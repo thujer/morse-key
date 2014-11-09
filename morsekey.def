@@ -1,0 +1,6 @@
+
+#define cMKey_DefaultCode    "..--.."            // Defaultni kod
+#define cMKey_PIN            PIN_EA_mirror       // Vstup signalu z tlacitka
+#define cMKey_ClearTime      cTm_2sec            // Cas pro nulovani kodu
+#define cMKey_RecognizeTime  cTm_200ms           // Cas pro detekci carky
+

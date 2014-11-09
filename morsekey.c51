@@ -1,0 +1,177 @@
+
+#include <reg52.h>
+#include "stdio.h"
+#include "pins.h"
+#include "pins.def"
+#include "timeouts.h"
+#include "timeouts.def"
+#include "morsekey.def"
+#include "scom_drv.h"
+#include "report.h"
+
+
+uchar code  EmergencyString1[]="---...---";
+uchar code  EmergencyString2[]="...---...";
+
+uchar xdata MKey_Code[10];        // Nastaveny kod
+uchar xdata MKey_Buf[10];         // Buffer pro moseuv kod
+uchar xdata MKey_Buf_ix;          // Index v bufferu
+
+//bit         bMKey_PIN_mirror;     // Obraz vstupniho PINu
+uchar data  sMKey_Proc;           // Ridici promenna stavoveho automatu
+
+bit         bMKey_Code_ACCEPTED;  // Kod akceptovan, nuluje se rucne nebo s kazdym dalsim znakem
+bit         bMKey_Emergency;      // Flag akceptace nouzoveho kodu
+
+
+// TODO:
+//   po 4x neplatnem kodu, vygenerovat 1min. pauzu
+//   po 8x neplatnem kodu  10min pauzu
+//   po 10x neplatnem kodu 30min pauzu
+
+//  +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+//  |  -  |  -  |  -  |  .  |  .  |  .  |  -  |  -  |  -  |
+//  |     |     |     |     |     |     |     |     |     |
+//  +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+
+// cTm_PINS_Key
+
+
+void MKey_Clear()
+{
+  uchar i;
+
+  for(i=0; i<sizeof(MKey_Buf); i++) MKey_Buf[i]=0;
+  MKey_Buf_ix = 0;
+}
+
+
+// Test na shodnost zadaneho kodu a pozadovaneho kodu
+void MKey_TestCode()
+{
+  uchar Ix;
+
+  bMKey_Code_ACCEPTED = 1;
+
+  Ix=0;
+  while(MKey_Code[Ix])
+  {
+    if(MKey_Code[Ix] != MKey_Buf[Ix]) bMKey_Code_ACCEPTED = 0;
+    Ix++;
+  }
+
+  bMKey_Emergency = 1;
+  Ix=0;
+  while(EmergencyString1[Ix])
+  {
+    if(EmergencyString1[Ix] != MKey_Buf[Ix]) bMKey_Emergency = 0;
+    Ix++;
+  }
+
+  if(~bMKey_Emergency)
+  {
+    bMKey_Emergency = 1;
+    Ix=0;
+    while(EmergencyString2[Ix])
+    {
+      if(EmergencyString2[Ix] != MKey_Buf[Ix]) bMKey_Emergency = 0;
+      Ix++;
+    }
+  }
+
+  if(bMKey_Code_ACCEPTED)
+  {
+    MKey_Clear();
+    Report_Chk(sprintf(Report_FBuf," MKEY: CODE OK [%s]\r\n", MKey_Buf));
+    Report_Message(cReport_Dest_ID_SCOM_DBG, Report_FBuf);
+  }
+
+  if(bMKey_Emergency)
+  {
+    MKey_Clear();
+    Report_Chk(sprintf(Report_FBuf," MKEY: EMERGENCY CODE [%s]\r\n", MKey_Buf));
+    Report_Message(cReport_Dest_ID_SCOM_DBG, Report_FBuf);
+  }
+}
+
+
+
+
+void MKey_Init()
+{
+  uchar i;
+
+  MKey_Clear();                                        // Vynuluj zadavany kod
+
+  for(i=0; i<sizeof(MKey_Code); i++) MKey_Code[i]=0;   // Nuluj definovany kod
+  for(i=0; i<sizeof(cMKey_DefaultCode); i++)
+  {
+    MKey_Code[i]=cMKey_DefaultCode[i];                 // Zapis default kod
+  }
+
+  sMKey_Proc = 0;
+  bMKey_Code_ACCEPTED = 0;
+}
+
+
+
+void MKey_Proc()
+{
+  switch(sMKey_Proc)
+  {
+    case  0:
+      if(~cMKey_PIN)                                        // Pokud je na vstupu L
+      {
+        Report_Message(cReport_Dest_ID_SCOM_DBG, " MKEY: Start, push\r\n");
+
+        Timeout_Set(cTm_PINS_Key, cMKey_RecognizeTime);                 // Nastav timeout pro rozliseni carky a tecky
+        sMKey_Proc++;
+      }
+      break;
+
+    case  1:
+      if(cMKey_PIN)
+      {
+        if(MKey_Buf_ix < sizeof(MKey_Buf))
+        {
+          if(Timeout(cTm_PINS_Key))
+          {
+            MKey_Buf[MKey_Buf_ix] = '-';
+          }
+          else
+          {
+            MKey_Buf[MKey_Buf_ix] = '.';
+          }
+
+          Report_Chk(sprintf(Report_FBuf," MKEY: Char: %s, time: %i\r\n", (MKey_Buf[MKey_Buf_ix]=='-')?"-":".", Timeout_Value(cTm_PINS_Key)));
+          Report_Message(cReport_Dest_ID_SCOM_DBG, Report_FBuf);
+
+          MKey_Buf_ix++;
+        }
+        Report_Message(cReport_Dest_ID_SCOM_DBG, " MKEY: Release\r\n");
+
+        MKey_TestCode();                                                    // Porovnej kod v bufferu
+        Timeout_Set(cTm_PINS_Key, cMKey_ClearTime);                         // Nastav timeout pro pokracovani v kodu
+        sMKey_Proc++;
+      }
+      break;
+
+    case  2:
+      if(~cMKey_PIN)                                                        // Cekej na stisk tlacitka
+      {
+        Report_Message(cReport_Dest_ID_SCOM_DBG, " MKEY: Push\r\n");
+        Timeout_Set(cTm_PINS_Key, cMKey_RecognizeTime);                     // Nastav timeout
+        sMKey_Proc = 1;
+      }
+
+      if(Timeout(cTm_PINS_Key))                                             // Pokud vyprsel timeout
+      {
+        Report_Message(cReport_Dest_ID_SCOM_DBG, " MKEY: Clear\r\n");
+
+        MKey_Clear();                                                       // Vynuluj buffer
+        sMKey_Proc = 0;                                                     // Restartuj proces
+      }
+      break;
+  }
+}
+
